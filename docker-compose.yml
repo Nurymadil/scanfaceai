@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  fwhr-scan:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    image: fwhr-scan:latest
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./pipnet_resnet.pth:/app/pipnet_resnet.pth:ro
+      - ./testo_model.pth:/app/testo_model.pth:ro

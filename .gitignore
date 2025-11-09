@@ -1,1 +1,29 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.env
+.env.*
+env/
+venv/
+.venv/
+build/
+dist/
+*.egg-info/
+
+# IDEs / tooling
+.vscode/
+.idea/
+.DS_Store
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+coverage.xml
+
+# Local artifacts
 dataset/
+pipnet_resnet.pth
+testo_model.pth
+*.pth

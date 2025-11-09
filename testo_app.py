@@ -1,26 +1,76 @@
+import asyncio
 import base64
 import io
+import json
+import logging
+import logging.config
+import time
+import uuid
+from threading import Lock
+from datetime import datetime
 from typing import Dict, List
 
-import numpy as np
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from PIL import Image
-
+import numpy as np
 import torch
-
-import torchlm
-from torchlm.tools import faceboxesv2
-from torchlm.models import pipnet
-
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+from PIL import Image
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+import torchlm
+from torchlm.models import pipnet
+from torchlm.tools import faceboxesv2
 
 # ===============================
 #   Настройки и вспомогательные функции
 # ===============================
 
-CHECKPOINT_PATH = "pipnet_resnet.pth"
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="FWHR_")
+
+    checkpoint_path: str = Field(default="pipnet_resnet.pth")
+    device_preference: str = Field(default="auto")
+    max_concurrent_inference: int = Field(default=2, ge=1, le=8)
+    log_level: str = Field(default="INFO")
+    history_limit: int = Field(default=5, ge=1, le=12)
+    enable_viz_cache: bool = Field(default=True)
+
+
+settings = Settings()
+
+LOGGING_CONFIG = {
+    "version": 1,
+    "formatters": {
+        "json": {
+            "format": "%(message)s",
+            "()": "pythonjsonlogger.jsonlogger.JsonFormatter",
+        }
+    },
+    "handlers": {
+        "default": {
+            "class": "logging.StreamHandler",
+            "formatter": "json",
+        }
+    },
+    "root": {
+        "handlers": ["default"],
+        "level": settings.log_level.upper(),
+    },
+}
+
+try:
+    logging.config.dictConfig(LOGGING_CONFIG)
+except Exception:
+    logging.basicConfig(level=settings.log_level.upper())
+
+logger = logging.getLogger("fwhr")
 
 UI_TIPS = [
     {
@@ -44,9 +94,29 @@ _runtime_loaded = False
 _runtime_device = None
 _detector = None
 _lm_model = None
+_runtime_lock = Lock()
+inference_semaphore = asyncio.Semaphore(settings.max_concurrent_inference)
+metrics_store = {
+    "requests_total": 0,
+    "faces_total": 0,
+    "failures_total": 0,
+}
+
+
+def _record_metric(key: str, value: int):
+    if key in metrics_store:
+        metrics_store[key] += value
 
 
 def get_device():
+    preference = settings.device_preference.lower()
+    if preference == "mps":
+        return torch.device("mps")
+    if preference == "cuda":
+        return torch.device("cuda")
+    if preference == "cpu":
+        return torch.device("cpu")
+
     if torch.backends.mps.is_available():
         return torch.device("mps")
     if torch.cuda.is_available():
@@ -62,27 +132,36 @@ def ensure_runtime():
     if _runtime_loaded:
         return _runtime_device
 
-    device = get_device()
+    with _runtime_lock:
+        if _runtime_loaded:
+            return _runtime_device
 
-    _detector = faceboxesv2(device=str(device))
-    torchlm.runtime.bind(_detector)
+        device = get_device()
+        logger.info(
+            "Loading inference runtime",
+            extra={"device": str(device), "checkpoint": settings.checkpoint_path},
+        )
 
-    _lm_model = pipnet(
-        backbone="resnet18",
-        pretrained=False,
-        num_nb=10,
-        num_lms=98,
-        net_stride=32,
-        input_size=256,
-        meanface_type="wflw",
-        map_location=str(device),
-        checkpoint=CHECKPOINT_PATH,
-    )
-    torchlm.runtime.bind(_lm_model)
+        _detector = faceboxesv2(device=str(device))
+        torchlm.runtime.bind(_detector)
 
-    _runtime_loaded = True
-    _runtime_device = device
-    return device
+        _lm_model = pipnet(
+            backbone="resnet18",
+            pretrained=False,
+            num_nb=10,
+            num_lms=98,
+            net_stride=32,
+            input_size=256,
+            meanface_type="wflw",
+            map_location=str(device),
+            checkpoint=settings.checkpoint_path,
+        )
+        torchlm.runtime.bind(_lm_model)
+
+        _runtime_loaded = True
+        _runtime_device = device
+        logger.info("Runtime ready", extra={"device": str(device)})
+        return device
 
 
 def calculate_fwhr_from_landmarks(landmarks_xy: np.ndarray) -> float:
@@ -171,14 +250,68 @@ def analyze_photo_bytes(image_bytes: bytes, device) -> Dict[str, List[Dict[str, 
     return {"results": results, "stats": stats}
 
 
+async def perform_analysis(image_bytes: bytes, request_id: str):
+    device = ensure_runtime()
+    started = time.perf_counter()
+    await inference_semaphore.acquire()
+    loop = asyncio.get_running_loop()
+    try:
+        analysis = await loop.run_in_executor(
+            None, lambda: analyze_photo_bytes(image_bytes, device)
+        )
+        duration_ms = (time.perf_counter() - started) * 1000
+        _record_metric("requests_total", 1)
+        _record_metric("faces_total", len(analysis["results"]))
+        logger.info(
+            "Analysis finished",
+            extra={
+                "request_id": request_id,
+                "faces": len(analysis["results"]),
+                "duration_ms": round(duration_ms, 2),
+            },
+        )
+        return analysis
+    finally:
+        inference_semaphore.release()
+
+
 # ===============================
 #   FastAPI endpoints + HTML UI
 # ===============================
 
 
+@app.middleware("http")
+async def request_context_middleware(request: Request, call_next):
+    request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+    request.state.request_id = request_id
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+        duration_ms = (time.perf_counter() - started) * 1000
+        logger.debug(
+            "Request handled",
+            extra={
+                "request_id": request_id,
+                "path": request.url.path,
+                "method": request.method,
+                "status_code": response.status_code,
+                "duration_ms": round(duration_ms, 2),
+            },
+        )
+        return response
+    except Exception as exc:
+        _record_metric("failures_total", 1)
+        logger.exception(
+            "Request failed",
+            extra={"request_id": request_id, "path": request.url.path},
+        )
+        raise exc
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse(
+        request,
         "index.html",
         {
             "request": request,
@@ -188,6 +321,9 @@ async def index(request: Request):
             "stats": None,
             "source_preview": None,
             "tips": UI_TIPS,
+            "request_id": getattr(request.state, "request_id", str(uuid.uuid4())),
+            "metrics": metrics_store,
+            "history_limit": settings.history_limit,
         },
     )
 
@@ -198,6 +334,7 @@ async def analyze_route(
     image_file: UploadFile = File(None),
     camera_data: str = Form(None),
 ):
+    request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
     context = {
         "request": request,
         "results": None,
@@ -206,6 +343,10 @@ async def analyze_route(
         "stats": None,
         "source_preview": None,
         "tips": UI_TIPS,
+        "request_id": request_id,
+        "metrics": metrics_store,
+        "history_limit": settings.history_limit,
+        "analysis_timestamp": None,
     }
     image_bytes = None
 
@@ -217,24 +358,24 @@ async def analyze_route(
             image_bytes = base64.b64decode(encoded)
         except Exception:
             context["error"] = "Не удалось разобрать снимок с камеры."
-            return templates.TemplateResponse("index.html", context)
+            return templates.TemplateResponse(request, "index.html", context)
     else:
         context["error"] = "Добавь фото перед анализом."
-        return templates.TemplateResponse("index.html", context)
-
-    device = ensure_runtime()
+        return templates.TemplateResponse(request, "index.html", context)
 
     try:
-        analysis = analyze_photo_bytes(image_bytes, device)
+        analysis = await perform_analysis(image_bytes, request_id)
     except Exception as exc:
         context["error"] = str(exc)
-        return templates.TemplateResponse("index.html", context)
+        return templates.TemplateResponse(request, "index.html", context)
 
     context["results"] = analysis["results"]
     context["faces_count"] = len(analysis["results"])
     context["stats"] = analysis["stats"]
     context["source_preview"] = base64.b64encode(image_bytes).decode("utf-8")
-    return templates.TemplateResponse("index.html", context)
+    context["analysis_timestamp"] = datetime.utcnow().isoformat()
+
+    return templates.TemplateResponse(request, "index.html", context)
 
 
 if __name__ == "__main__":

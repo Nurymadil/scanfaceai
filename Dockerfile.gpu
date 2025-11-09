@@ -1,0 +1,24 @@
+FROM pytorch/pytorch:2.2.2-cuda12.1-cudnn8-runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY requirements.txt .
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+ENV FWHR_CHECKPOINT_PATH=/app/pipnet_resnet.pth \
+    FWHR_DEVICE_PREFERENCE=cuda
+
+EXPOSE 8000
+
+CMD ["uvicorn", "testo_app:app", "--host", "0.0.0.0", "--port", "8000"]
