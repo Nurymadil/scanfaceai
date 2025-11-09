@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>fWHR Scan</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-50 min-h-screen">
+    <div class="absolute inset-0 pointer-events-none">
+        <div class="h-full w-full bg-gradient-to-b from-indigo-900/50 via-slate-950 to-slate-950 blur-3xl opacity-60"></div>
+    </div>
+
+    <main class="relative z-10 max-w-6xl mx-auto py-10 px-4 space-y-8">
+        <header class="space-y-4 text-center lg:text-left">
+            <p class="inline-flex items-center gap-2 px-4 py-1 rounded-full border border-indigo-500/30 text-sm text-indigo-200/90">
+                <span class="inline-flex h-2 w-2 rounded-full bg-indigo-400 animate-pulse"></span>
+                Beta-версия анализатора
+            </p>
+            <div class="space-y-3">
+                <h1 class="text-4xl lg:text-5xl font-semibold tracking-tight text-white">fWHR Scan</h1>
+                <p class="text-base lg:text-lg text-slate-300 max-w-3xl">
+                    Загрузи селфи или сделай кадр с камеры — нейросеть посчитает facial width-to-height ratio для каждого лица и покажет лендмарки. 
+                    Это экспериментальный инструмент и не медицинский тест.
+                </p>
+            </div>
+        </header>
+
+        <section class="grid gap-8 lg:grid-cols-[minmax(0,420px)_1fr]">
+            <div class="bg-white/5 border border-white/10 rounded-3xl p-6 backdrop-blur-xl shadow-2xl space-y-6">
+                <div>
+                    <p class="text-sm uppercase tracking-[0.2em] text-indigo-200 mb-2">Источник</p>
+                    <h2 class="text-2xl font-semibold text-white">Добавь фото</h2>
+                </div>
+                <form id="analyze-form" action="/analyze" method="post" enctype="multipart/form-data" class="space-y-6">
+                    <div class="grid grid-cols-2 gap-3 text-sm font-medium text-slate-300">
+                        <label class="flex items-center gap-2 px-3 py-2 rounded-2xl border border-white/20 bg-white/5">
+                            <input type="radio" name="mode" value="file" class="text-indigo-500 focus:ring-indigo-400" checked />
+                            Файл
+                        </label>
+                        <label class="flex items-center gap-2 px-3 py-2 rounded-2xl border border-white/20 bg-white/5">
+                            <input type="radio" name="mode" value="camera" class="text-indigo-500 focus:ring-indigo-400" />
+                            Веб-камера
+                        </label>
+                    </div>
+
+                    <div id="file-section" class="space-y-3">
+                        <p class="text-xs uppercase tracking-[0.25em] text-slate-400">JPEG / PNG</p>
+                        <label class="flex flex-col items-center justify-center border-2 border-dashed border-white/20 rounded-2xl p-6 cursor-pointer hover:border-indigo-400/40 transition">
+                            <span class="text-sm text-slate-200">Перетащи файл сюда или кликни для выбора</span>
+                            <input id="image-file" type="file" name="image_file" accept="image/*" class="hidden" />
+                        </label>
+                    </div>
+
+                    <div id="camera-section" class="hidden space-y-4">
+                        <div class="aspect-video bg-slate-900/60 rounded-2xl border border-white/10 flex items-center justify-center overflow-hidden">
+                            <video id="camera-stream" class="w-full h-full object-cover hidden" autoplay playsinline></video>
+                            <div id="camera-placeholder" class="text-slate-400 text-sm text-center px-6">
+                                Разреши доступ к камере, чтобы увидеть предпросмотр
+                            </div>
+                        </div>
+                        <canvas id="camera-canvas" class="hidden"></canvas>
+                        <input type="hidden" name="camera_data" id="camera-data" />
+                        <img id="camera-preview" class="hidden w-full rounded-2xl border border-white/10" alt="Превью снимка" />
+                        <div class="flex flex-wrap items-center gap-4">
+                            <button type="button" id="capture-btn" class="px-4 py-2 rounded-2xl bg-indigo-500 text-white font-semibold hover:bg-indigo-400">
+                                Сделать снимок
+                            </button>
+                            <span id="capture-status" class="text-sm text-slate-400">Наведись и сделай снимок.</span>
+                        </div>
+                    </div>
+
+                    <button
+                        type="submit"
+                        class="w-full flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-indigo-600 text-white font-semibold hover:bg-indigo-500 transition shadow-lg shadow-indigo-500/30"
+                    >
+                        <span class="text-sm uppercase tracking-[0.3em]">Анализировать</span>
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14 5l7 7-7 7M21 12H3" />
+                        </svg>
+                    </button>
+                </form>
+            </div>
+
+            <div class="bg-white/5 border border-white/10 rounded-3xl p-6 backdrop-blur-xl shadow-2xl space-y-6">
+                <h3 class="text-xl font-semibold text-white">Как работает fWHR Scan</h3>
+                <ul class="space-y-4 text-sm text-slate-300">
+                    <li class="flex gap-3">
+                        <span class="mt-1 h-2 w-2 rounded-full bg-indigo-400"></span>
+                        Локально запускаем связку FaceBoxesV2 + PIPNet (98 точек) и вычисляем отношение ширины к высоте лица.
+                    </li>
+                    <li class="flex gap-3">
+                        <span class="mt-1 h-2 w-2 rounded-full bg-indigo-400"></span>
+                        Показатели считаются для каждого лица в кадре, а карты landmark-ов отрисовываются поверх grayscale-предпросмотра.
+                    </li>
+                    <li class="flex gap-3">
+                        <span class="mt-1 h-2 w-2 rounded-full bg-indigo-400"></span>
+                        Мы не храним фото — всё обрабатывается на вашей машине. fWHR — лишь развлекательный индикатор.
+                    </li>
+                </ul>
+                <div class="rounded-2xl border border-white/10 bg-slate-900/40 p-4 text-xs text-slate-400">
+                    Disclaimer: fWHR не отражает медицинские показатели. Используйте сервис только для любопытства.
+                </div>
+            </div>
+        </section>
+
+        {% if error %}
+        <div class="bg-rose-500/10 border border-rose-400/60 text-rose-100 px-4 py-3 rounded-2xl">
+            {{ error }}
+        </div>
+        {% endif %}
+
+        {% if stats %}
+        <section class="grid gap-4 md:grid-cols-3">
+            <article class="rounded-3xl border border-white/10 bg-white/5 p-5">
+                <p class="text-xs uppercase tracking-[0.3em] text-slate-400">Средний fWHR</p>
+                <p class="text-3xl font-semibold text-white mt-2">{{ stats.mean_fwhr }}</p>
+            </article>
+            <article class="rounded-3xl border border-white/10 bg-white/5 p-5">
+                <p class="text-xs uppercase tracking-[0.3em] text-slate-400">Минимум</p>
+                <p class="text-3xl font-semibold text-white mt-2">{{ stats.min_fwhr }}</p>
+            </article>
+            <article class="rounded-3xl border border-white/10 bg-white/5 p-5">
+                <p class="text-xs uppercase tracking-[0.3em] text-slate-400">Максимум</p>
+                <p class="text-3xl font-semibold text-white mt-2">{{ stats.max_fwhr }}</p>
+            </article>
+        </section>
+        {% endif %}
+
+        {% if source_preview %}
+        <section class="rounded-3xl border border-white/10 bg-white/5 p-6 space-y-4">
+            <h4 class="text-lg font-semibold text-white">Оригинальное фото</h4>
+            <img src="data:image/png;base64,{{ source_preview }}" alt="Загруженное изображение" class="w-full rounded-2xl border border-white/10" />
+        </section>
+        {% endif %}
+
+        {% if results %}
+        <section class="space-y-6">
+            <div class="flex flex-col gap-1">
+                <p class="text-xl font-semibold text-white">Найдено лиц: {{ faces_count }}</p>
+                <p class="text-sm text-slate-400">Ниже визуализированы точки для каждого лица. Цветовая схема помогает отслеживать симметрию.</p>
+            </div>
+            <div class="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
+                {% for face in results %}
+                <div class="rounded-3xl border border-white/10 bg-slate-900/60 p-5 space-y-3">
+                    <div class="flex items-center justify-between text-sm text-slate-300">
+                        <span class="font-medium">{{ face.label }}</span>
+                        <span class="px-3 py-1 rounded-full bg-indigo-500/20 text-indigo-200 font-semibold">fWHR {{ face.fwhr }}</span>
+                    </div>
+                    <img
+                        class="w-full rounded-2xl border border-white/10 bg-white"
+                        src="data:image/png;base64,{{ face.image_base64 }}"
+                        alt="Landmarks {{ face.label }}"
+                    />
+                </div>
+                {% endfor %}
+            </div>
+        </section>
+        {% endif %}
+
+        <section class="rounded-3xl border border-white/10 bg-white/5 p-6 space-y-6">
+            <div class="flex flex-col gap-2">
+                <p class="text-lg font-semibold text-white">Советы по снимку</p>
+                <p class="text-sm text-slate-400">Пара простых рекомендаций, чтобы модель получала максимум информации.</p>
+            </div>
+            <div class="grid gap-4 md:grid-cols-3">
+                {% for tip in tips %}
+                <article class="rounded-2xl border border-white/10 bg-slate-900/50 p-4 space-y-2">
+                    <h5 class="text-base font-semibold text-white">{{ tip.title }}</h5>
+                    <p class="text-sm text-slate-400">{{ tip.body }}</p>
+                </article>
+                {% endfor %}
+            </div>
+        </section>
+    </main>
+
+    <script>
+        const form = document.getElementById("analyze-form");
+        const modeRadios = document.querySelectorAll("input[name='mode']");
+        const fileSection = document.getElementById("file-section");
+        const cameraSection = document.getElementById("camera-section");
+        const cameraPlaceholder = document.getElementById("camera-placeholder");
+        const fileInput = document.getElementById("image-file");
+        const cameraDataInput = document.getElementById("camera-data");
+        const video = document.getElementById("camera-stream");
+        const canvas = document.getElementById("camera-canvas");
+        const preview = document.getElementById("camera-preview");
+        const captureBtn = document.getElementById("capture-btn");
+        const captureStatus = document.getElementById("capture-status");
+
+        let cameraStream = null;
+
+        function switchMode(mode) {
+            if (mode === "file") {
+                fileSection.classList.remove("hidden");
+                cameraSection.classList.add("hidden");
+                stopCamera();
+                cameraDataInput.value = "";
+                preview.classList.add("hidden");
+                captureStatus.textContent = "Наведись и сделай снимок.";
+            } else {
+                fileSection.classList.add("hidden");
+                cameraSection.classList.remove("hidden");
+                startCamera();
+            }
+        }
+
+        function submitAnalysis() {
+            if (typeof form.requestSubmit === "function") {
+                form.requestSubmit();
+            } else {
+                form.submit();
+            }
+        }
+
+        async function startCamera() {
+            if (cameraStream) {
+                return;
+            }
+            try {
+                cameraStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                video.srcObject = cameraStream;
+                video.classList.remove("hidden");
+                cameraPlaceholder.classList.add("hidden");
+                captureStatus.textContent = "Сделай снимок и отправь.";
+            } catch (error) {
+                captureStatus.textContent = "Нет доступа к камере.";
+            }
+        }
+
+        function stopCamera() {
+            if (cameraStream) {
+                cameraStream.getTracks().forEach((track) => track.stop());
+                cameraStream = null;
+            }
+            video.classList.add("hidden");
+            cameraPlaceholder.classList.remove("hidden");
+        }
+
+        fileInput.addEventListener("change", () => {
+            if (!fileInput.files.length) {
+                return;
+            }
+            submitAnalysis();
+        });
+
+        modeRadios.forEach((radio) => {
+            radio.addEventListener("change", (event) => switchMode(event.target.value));
+        });
+
+        captureBtn.addEventListener("click", () => {
+            if (!cameraStream) {
+                captureStatus.textContent = "Нет доступа к камере.";
+                return;
+            }
+            const width = video.videoWidth;
+            const height = video.videoHeight;
+            if (!width || !height) {
+                captureStatus.textContent = "Камера ещё не готова.";
+                return;
+            }
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext("2d");
+            ctx.drawImage(video, 0, 0, width, height);
+            const dataUrl = canvas.toDataURL("image/png");
+            cameraDataInput.value = dataUrl;
+            preview.src = dataUrl;
+            preview.classList.remove("hidden");
+            captureStatus.textContent = "Снимок готов, анализирую...";
+            submitAnalysis();
+        });
+
+        form.addEventListener("submit", (event) => {
+            const mode = document.querySelector("input[name='mode']:checked").value;
+            if (mode === "camera" && !cameraDataInput.value) {
+                event.preventDefault();
+                captureStatus.textContent = "Сначала сделай снимок.";
+                return;
+            }
+            if (mode === "file" && !fileInput.value) {
+                event.preventDefault();
+                alert("Пожалуйста, выбери файл перед отправкой.");
+            }
+        });
+    </script>
+</body>
+</html>
